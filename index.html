@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Excel取込 → ブラウザで関数計算（HyperFormula + Handsontable + SheetJS）</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@14/dist/handsontable.full.min.css" />
+  <style>
+    :root { --bg:#f7f7f8; --card:#fff; --muted:#667085; }
+    body{font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans JP", Hiragino Kaku Gothic ProN, "Yu Gothic", Meiryo, sans-serif; margin: 24px; background: var(--bg);} 
+    .wrap{max-width: 1200px; margin:0 auto;}
+    h1{font-size: 1.25rem; margin: 0 0 16px;}
+    .card{background:var(--card); border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.08); padding:16px;}
+    .toolbar{display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:12px}
+    .toolbar label{font-size:.95rem; color:#111}
+    .toolbar input[type=file]{padding:8px; border:1px solid #e5e7eb; border-radius:10px; background:#fff}
+    select, button{padding:8px 12px; border-radius:10px; border:1px solid #e5e7eb; background:#fff; cursor:pointer}
+    button.primary{background:#111; color:#fff; border-color:#111}
+    #grid{height: 560px;}
+    .tips{font-size:.92rem; color:var(--muted); line-height:1.7}
+    code.kbd{background:#f1f3f5; padding:2px 6px; border-radius:6px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Excel を読み込んでブラウザ上で “Excel関数” を再計算</h1>
+  <div class="card">
+    <div class="toolbar">
+      <label>Excel を選択（.xlsx / .xlsm / .xls）：
+        <input id="file" type="file" accept=".xlsx,.xlsm,.xls" />
+      </label>
+      <label>シート：
+        <select id="sheetSel"></select>
+      </label>
+      <button id="exportBtn" class="primary" disabled>この表を .xlsx として書き出し</button>
+    </div>
+    <div id="grid"></div>
+    <p class="tips">
+      ▼ セルに <code class="kbd">=SUM(D2:D3)</code>、<code class="kbd">=IF(...)</code>、<code class="kbd">=VLOOKUP(...)</code> などを入力可能。<br>
+      ※ <strong>.xlsm の VBA マクロは実行できません</strong>（式・値の読み込みは可）。必要なら VBA ロジックは JavaScript に移植します。<br>
+      ※ 保存（書き出し）は“見えている 1 シート分”です。複数シートの一括保存が必要なら拡張できます。
+    </p>
+  </div>
+</div>
+
+<!-- CDN ライブラリ -->
+<script src="https://cdn.jsdelivr.net/npm/hyperformula@2.7.1/dist/hyperformula.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/handsontable@14/dist/handsontable.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<script>
+  let hot = null;          // Handsontable インスタンス
+  let hf = null;           // HyperFormula エンジン
+  let currentData = [];    // 2次元配列（式は "=..." 文字列）
+  let workbookName = '';
+  let currentSheetName = '';
+
+  const $file = document.getElementById('file');
+  const $sheetSel = document.getElementById('sheetSel');
+  const $exportBtn = document.getElementById('exportBtn');
+  const $grid = document.getElementById('grid');
+
+  // Handsontable を立ち上げ
+  function mountGrid(data){
+    // エンジンは都度作り直し（古い依存を残さない）
+    if(hf){ try{ hf.destroy(); }catch(e){} }
+    hf = HyperFormula.HyperFormula.buildEmpty({ licenseKey: 'gpl-v3' });
+
+    if(hot){ hot.destroy(); }
+    hot = new Handsontable($grid, {
+      data,
+      rowHeaders: true,
+      colHeaders: true,
+      contextMenu: true,
+      width: '100%',
+      height: 560,
+      licenseKey: 'non-commercial-and-evaluation',
+      formulas: { engine: hf },
+      // 便利オプション（お好みで）
+      manualColumnResize: true,
+      manualRowResize: true,
+      stretchH: 'all'
+    });
+  }
+
+  // SheetJS のワークシートを 2次元配列へ変換（式があれば "=..." に）
+  function sheetTo2DArray(ws){
+    const range = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : { s:{r:0,c:0}, e:{r:99,c:26} };
+    const rows = [];
+    for(let R = range.s.r; R <= range.e.r; R++){
+      const row = [];
+      for(let C = range.s.c; C <= range.e.c; C++){
+        const addr = XLSX.utils.encode_cell({r:R, c:C});
+        const cell = ws[addr];
+        if(!cell){ row.push(''); continue; }
+        if(typeof cell.f !== 'undefined' && cell.f !== ''){
+          row.push('=' + cell.f);   // 式
+        }else{
+          row.push(cell.v ?? '');   // 値
+        }
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  // 2次元配列 → SheetJS ワークシート（"=..." は式とみなす）
+  function arrayToSheet(data){
+    const ws = {};
+    const R = data.length, C = data[0] ? data[0].length : 0;
+    for(let r=0;r<R;r++){
+      for(let c=0;c<C;c++){
+        const v = data[r][c];
+        const addr = XLSX.utils.encode_cell({r, c});
+        if(typeof v === 'string' && v.startsWith('=')){
+          ws[addr] = { t:'n', f: v.slice(1) }; // 書式は簡易（必要なら型推定を追加）
+        }else if(v === '' || v == null){
+          // 何も入れない
+        }else if(typeof v === 'number'){
+          ws[addr] = { t:'n', v };
+        }else if(v instanceof Date){
+          ws[addr] = { t:'d', v };
+        }else{
+          ws[addr] = { t:'s', v: String(v) };
+        }
+      }
+    }
+    if(R>0 && C>0){ ws['!ref'] = XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:R-1,c:C-1}}); }
+    return ws;
+  }
+
+  // ファイル読込
+  $file.addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0];
+    if(!f) return;
+    workbookName = f.name.replace(/\.(xlsx|xlsm|xls)$/i, '');
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, { type:'array', cellFormula:true, cellNF:true, cellDates:true });
+    // シート一覧
+    const sheetNames = wb.SheetNames;
+    $sheetSel.innerHTML = sheetNames.map((n,i)=>`<option value="${i}">${n}</option>`).join('');
+    currentSheetName = sheetNames[0];
+    currentData = sheetTo2DArray(wb.Sheets[currentSheetName]);
+    mountGrid(currentData);
+    $exportBtn.disabled = false;
+  });
+
+  // シート切替
+  $sheetSel.addEventListener('change', ()=>{
+    // 同じファイルを再読込（input の file オブジェクトから）
+    const f = $file.files?.[0];
+    if(!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const wb = XLSX.read(reader.result, {type:'array', cellFormula:true, cellNF:true, cellDates:true});
+      currentSheetName = wb.SheetNames[Number($sheetSel.value)];
+      currentData = sheetTo2DArray(wb.Sheets[currentSheetName]);
+      mountGrid(currentData);
+    };
+    reader.readAsArrayBuffer(f);
+  });
+
+  // 書き出し（見えているシート分）
+  $exportBtn.addEventListener('click', ()=>{
+    if(!hot) return;
+    const data = hot.getData();
+    const wb = XLSX.utils.book_new();
+    const ws = arrayToSheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, currentSheetName || 'Sheet1');
+    const fname = (workbookName || 'export') + '_' + (currentSheetName || 'sheet') + '.xlsx';
+    XLSX.writeFile(wb, fname);
+  });
+</script>
+</body>
+</html>
