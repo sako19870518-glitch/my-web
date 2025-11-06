@@ -3,7 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Excelを自動読み込みしてブラウザで再計算（スマホ選択なし）</title>
+  <title>スケール変換</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#111111">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@14/dist/handsontable.full.min.css" />
   <style>
     :root{--bg:#f7f7f8;--card:#fff;--muted:#667085;--border:#e5e7eb;}
@@ -13,7 +16,7 @@
     h1{font-size:1.1rem;margin:0 0 12px}
     .card{background:var(--card);border-radius:16px;box-shadow:0 6px 24px rgba(0,0,0,.08);padding:12px}
     .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 12px}
-    .toolbar button, .toolbar a{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;cursor:pointer;text-decoration:none;color:#111}
+    .toolbar button{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;cursor:pointer}
     .toolbar button.primary{background:#111;color:#fff;border-color:#111}
     .status{font-size:.9rem;color:var(--muted)}
     #grid{height:70vh;}
@@ -22,7 +25,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Excelを自動読み込み → ブラウザで関数を再計算（HyperFormula + Handsontable + SheetJS）</h1>
+  <h1>スケール変換</h1>
   <div class="card">
     <div class="toolbar">
       <span class="status" id="status">読み込み準備中…</span>
@@ -30,17 +33,12 @@
       <button id="exportBtn" class="hidden">このシートを .xlsx として保存</button>
     </div>
     <div id="grid"></div>
-    <div class="status" style="margin-top:8px">
-      ※ このページは同じフォルダに置いた <code>book.xlsx</code> を自動で読み込みます。スマホでのファイル選択は不要です。
-    </div>
+    <div class="status" style="margin-top:8px">※ book.xlsx を自動読み込みします。</div>
   </div>
 </div>
-
-<!-- CDN -->
 <script src="https://cdn.jsdelivr.net/npm/hyperformula@2.7.1/dist/hyperformula.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/handsontable@14/dist/handsontable.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-
 <script>
   const STATUS = document.getElementById('status');
   const RELOAD = document.getElementById('reloadBtn');
@@ -50,8 +48,6 @@
 
   function setStatus(msg){ STATUS.textContent = msg; }
   function show(el){ el.classList.remove('hidden'); }
-  function hide(el){ el.classList.add('hidden'); }
-
   function mountGrid(data){
     if(hf){ try{ hf.destroy(); }catch(e){} }
     hf = HyperFormula.HyperFormula.buildEmpty({ licenseKey: 'gpl-v3' });
@@ -72,7 +68,7 @@
   }
 
   function sheetTo2DArray(ws){
-    const range = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : { s:{r:0,c:0}, e:{r:99,c:26} };
+    const range = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : { s:{r:0,c:0}, e:{r:50,c:20} };
     const rows = [];
     for(let R=range.s.r; R<=range.e.r; R++){
       const row = [];
@@ -80,7 +76,7 @@
         const addr = XLSX.utils.encode_cell({r:R,c:C});
         const cell = ws[addr];
         if(!cell){ row.push(''); continue; }
-        if(typeof cell.f !== 'undefined' && cell.f !== '') row.push('=' + cell.f);
+        if(cell.f) row.push('=' + cell.f);
         else row.push(cell.v ?? '');
       }
       rows.push(row);
@@ -92,26 +88,19 @@
     setStatus('book.xlsx を読み込み中…');
     try{
       const res = await fetch('book.xlsx', { cache: 'no-cache' });
-      if(!res.ok) throw new Error('HTTP ' + res.status);
       const buf = await res.arrayBuffer();
-      localStorage.setItem('book.xlsx.cache','1');
       const wb = XLSX.read(buf, { type:'array', cellFormula:true, cellDates:true });
       const first = wb.SheetNames[0];
       currentSheetName = first;
       const data = sheetTo2DArray(wb.Sheets[first]);
       mountGrid(data);
-      setStatus('読み込み完了：' + first + '（スマホ選択不要）');
+      setStatus('読み込み完了：' + first);
       show(RELOAD); show(EXPORT);
-    }catch(err){
-      console.error(err);
-      setStatus('book.xlsx が見つかりません。リポジトリに book.xlsx を置いてください。');
-      show(RELOAD);
-    }
+    }catch(err){ setStatus('book.xlsx が見つかりません'); }
   }
 
   RELOAD.addEventListener('click', fetchWorkbook);
   EXPORT.addEventListener('click', ()=>{
-    if(!hot) return;
     const data = hot.getData();
     const ws = {};
     const R=data.length, C=data[0]?data[0].length:0;
@@ -130,8 +119,12 @@
     XLSX.writeFile(wb, (currentSheetName||'sheet') + '_edited.xlsx');
   });
 
-  // 起動
   fetchWorkbook();
+</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./service-worker.js');
+  }
 </script>
 </body>
 </html>
